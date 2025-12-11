@@ -229,7 +229,7 @@ PersistentKeepalive = 25
 }
 
 // VPN 공인 IP 확인
-function getVpnPublicIp(namespace) {
+function getVpnPublicIp(namespace, wgInterface) {
   try {
     const ip = execSync(`ip netns exec ${namespace} curl -s --max-time 10 https://api.ipify.org`, {
       encoding: 'utf8',
@@ -237,6 +237,16 @@ function getVpnPublicIp(namespace) {
     }).trim();
     return ip;
   } catch (e) {
+    // 실패 시 WireGuard 상태 출력 (디버깅용)
+    try {
+      const wgStatus = execSync(`ip netns exec ${namespace} wg show ${wgInterface || ''} 2>&1`, {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      console.log(`[DEBUG] WireGuard 상태:\n${wgStatus}`);
+    } catch (e2) {
+      console.log(`[DEBUG] WireGuard 상태 확인 실패: ${e2.message}`);
+    }
     return null;
   }
 }
@@ -360,7 +370,7 @@ class VpnInstance {
       this.connected = true;
 
       // 5. VPN 공인 IP 확인
-      const vpnIp = getVpnPublicIp(this.namespace);
+      const vpnIp = getVpnPublicIp(this.namespace, this.wgInterface);
       if (!vpnIp) {
         throw new Error('VPN 연결 확인 실패');
       }
@@ -412,7 +422,7 @@ class VpnInstance {
       setupVpnNamespace(this.namespace, this.wgInterface, wgConfig, this.agentId);
       this.connected = true;
 
-      const vpnIp = getVpnPublicIp(this.namespace);
+      const vpnIp = getVpnPublicIp(this.namespace, this.wgInterface);
       if (!vpnIp) {
         throw new Error('VPN 재연결 확인 실패');
       }
