@@ -389,6 +389,24 @@ class VpnInstance {
       return true;
     } catch (err) {
       vpnLog(this.agentId, `연결 실패: ${err.message}`);
+
+      // 연결 실패 시 동글 반납 (다른 에이전트가 사용할 수 있도록)
+      if (this.dongleInfo) {
+        vpnLog(this.agentId, `연결 실패로 동글 반납: dongle=${this.dongleNumber}`);
+        try {
+          await dongleAllocator.release(this.agentId, this.dongleInfo.id);
+        } catch (releaseErr) {
+          vpnLog(this.agentId, `⚠️ 동글 반납 실패: ${releaseErr.message}`);
+        }
+        this.dongleInfo = null;
+        this.dongleNumber = null;
+      }
+
+      // VPN 네임스페이스 정리
+      if (this.namespace && this.wgInterface) {
+        cleanupVpn(this.namespace, this.wgInterface);
+      }
+
       return false;
     }
   }
@@ -398,16 +416,25 @@ class VpnInstance {
     try {
       vpnLog(this.agentId, 'VPN 재연결 중...');
 
-      // 기존 연결 정리
+      // 1. 기존 VPN 연결 정리
       if (this.namespace && this.wgInterface) {
         cleanupVpn(this.namespace, this.wgInterface);
       }
       this.connected = false;
 
-      // 잠시 대기
+      // 2. 기존 동글 반납 (중요! 반납 후 새 동글 할당받아야 함)
+      if (this.dongleInfo) {
+        vpnLog(this.agentId, `기존 동글 반납: dongle=${this.dongleNumber}`);
+        await dongleAllocator.release(this.agentId, this.dongleInfo.id);
+        this.dongleInfo = null;
+        this.dongleNumber = null;
+      }
+
+      // 3. 잠시 대기 (서버 처리 시간)
       await new Promise(r => setTimeout(r, 2000));
 
-      // 동글 재할당 (같은 agent_id로 요청하면 새 동글 또는 기존 동글 재사용)
+      // 4. 새 동글 할당 요청
+      vpnLog(this.agentId, '새 동글 할당 요청...');
       this.dongleInfo = await dongleAllocator.allocate(this.agentId);
       if (!this.dongleInfo) {
         throw new Error('동글 재할당 실패');
@@ -775,16 +802,26 @@ class VpnInstance {
       if (this.shouldStop) break;
 
       // 스코어 체크 → 재연결 필요시 동글 재할당
-      if (result.shouldToggle && result.score !== 0) {
-        vpnLog(this.agentId, `스코어 ${result.score} < 2 → 동글 재할당 실행`);
+      // 조건: score < 2 이고, 실제로 작업이 있었을 때 (차단 포함)
+      const hasWork = result.stats.success + result.stats.fail + result.stats.blocked > 0;
+      if (result.shouldToggle && hasWork) {
+        vpnLog(this.agentId, `스코어 ${result.score} < 2 (차단:${result.stats.blocked}) → 동글 재할당 실행`);
         this.totalStats.toggleCount++;
 
-        // VPN 재연결 (새 동글 할당)
-        const reconnected = await this.reconnect();
+        // VPN 재연결 (새 동글 할당) - 최대 3회 재시도
+        let reconnected = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          reconnected = await this.reconnect();
+          if (reconnected) break;
+          vpnLog(this.agentId, `VPN 재연결 실패 (${attempt}/3) → ${attempt < 3 ? '10초 후 재시도' : '포기'}`);
+          if (attempt < 3) {
+            await new Promise(r => setTimeout(r, 10000));
+          }
+        }
+
         if (!reconnected) {
-          vpnLog(this.agentId, 'VPN 재연결 실패 → 10초 후 재시도');
-          await new Promise(r => setTimeout(r, 10000));
-          continue;
+          vpnLog(this.agentId, '❌ VPN 재연결 3회 실패 → 루프 종료');
+          break;  // 더 이상 진행 불가, 루프 종료
         }
       }
 
@@ -1007,8 +1044,19 @@ async function main() {
     error(`오류 발생: ${err.message}`);
     process.exitCode = 1;
   } finally {
-    // VPN 정리
+    // 동글 반납 (정상 종료 시에도 반드시 반납)
     console.log('');
+    log('동글 반납 중...');
+    try {
+      await Promise.all(
+        vpnInstances.map(instance => instance.releaseDongle().catch(() => {}))
+      );
+      log('동글 반납 완료');
+    } catch (e) {
+      warn(`동글 반납 중 오류: ${e.message}`);
+    }
+
+    // VPN 네임스페이스 정리
     cleanupAllVpns();
   }
 }
