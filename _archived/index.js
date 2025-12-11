@@ -123,6 +123,13 @@ async function main() {
     // 브라우저 프로필 초기화 (시작 시 손상된 프로필 방지)
     cleanBrowserProfiles(options.threads || 4);
 
+    // VPN 모드 체크 (환경변수로 전달됨)
+    if (process.env.VPN_MODE === 'true') {
+      options.vpnMode = true;
+      options.vpnNamespace = process.env.VPN_NAMESPACE;
+      console.log(`🌐 VPN 모드 활성화 (${options.vpnNamespace}) - 프록시 무시\n`);
+    }
+
     // API 모드로만 실행
     console.log(`🚀 API 모드 실행 시작\n`);
     await runApiMode(options);

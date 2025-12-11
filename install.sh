@@ -43,7 +43,8 @@ if command -v apt-get &> /dev/null; then
             libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 \
             libcairo2 libasound2 \
             fonts-liberation libappindicator3-1 \
-            xdg-utils wget ca-certificates
+            xdg-utils wget ca-certificates \
+            wireguard wireguard-tools
     else
         apt-get update
         apt-get install -y \
@@ -52,10 +53,11 @@ if command -v apt-get &> /dev/null; then
             libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 \
             libcairo2 libasound2 \
             fonts-liberation libappindicator3-1 \
-            xdg-utils wget ca-certificates
+            xdg-utils wget ca-certificates \
+            wireguard wireguard-tools
     fi
 
-    echo "✅ Chrome 의존성 설치 완료"
+    echo "✅ Chrome 의존성 및 WireGuard 설치 완료"
     echo ""
 fi
 
