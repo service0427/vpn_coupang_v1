@@ -163,24 +163,28 @@ function createAgentId(vpnIndex) {
 
 // VPN 네임스페이스 생성 및 연결 (새 API 기반)
 function setupVpnNamespace(namespace, wgInterface, config, agentId) {
-  vpnLog(agentId, `네임스페이스 설정 중...`);
+  const step = (msg) => DEBUG_MODE && vpnLog(agentId, `  [setup] ${msg}`);
 
-  // 기존 정리
   try {
+    // 기존 정리
+    step('기존 네임스페이스 정리...');
     execSync(`ip netns del ${namespace} 2>/dev/null || true`, { stdio: 'pipe' });
-  } catch (e) {}
+    execSync(`ip link del ${wgInterface} 2>/dev/null || true`, { stdio: 'pipe' });
 
-  // 네임스페이스 생성
-  execSync(`ip netns add ${namespace}`);
-  execSync(`ip netns exec ${namespace} ip link set lo up`);
+    // 네임스페이스 생성
+    step('네임스페이스 생성...');
+    execSync(`ip netns add ${namespace}`);
+    execSync(`ip netns exec ${namespace} ip link set lo up`);
 
-  // WireGuard 인터페이스 생성
-  execSync(`ip link add ${wgInterface} type wireguard`);
-  execSync(`ip link set ${wgInterface} netns ${namespace}`);
+    // WireGuard 인터페이스 생성
+    step(`WireGuard 인터페이스 생성: ${wgInterface}`);
+    execSync(`ip link add ${wgInterface} type wireguard`);
+    execSync(`ip link set ${wgInterface} netns ${namespace}`);
 
-  // WireGuard 설정 파일 생성
-  const tempConf = `/tmp/wg-${namespace}.conf`;
-  const wgConfig = `[Interface]
+    // WireGuard 설정 파일 생성
+    step('WireGuard 설정 적용...');
+    const tempConf = `/tmp/wg-${namespace}.conf`;
+    const wgConfig = `[Interface]
 PrivateKey = ${config.privateKey}
 
 [Peer]
@@ -189,25 +193,39 @@ Endpoint = ${config.endpoint}
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 `;
-  fs.writeFileSync(tempConf, wgConfig);
+    fs.writeFileSync(tempConf, wgConfig);
 
-  // WireGuard 설정 적용
-  execSync(`ip netns exec ${namespace} wg setconf ${wgInterface} ${tempConf}`);
-  fs.unlinkSync(tempConf);
+    // WireGuard 설정 적용
+    execSync(`ip netns exec ${namespace} wg setconf ${wgInterface} ${tempConf}`);
+    fs.unlinkSync(tempConf);
 
-  // IP 할당 및 활성화
-  execSync(`ip netns exec ${namespace} ip addr add ${config.address} dev ${wgInterface}`);
-  execSync(`ip netns exec ${namespace} ip link set ${wgInterface} up`);
+    // IP 할당 및 활성화
+    step(`IP 할당: ${config.address}`);
+    execSync(`ip netns exec ${namespace} ip addr add ${config.address} dev ${wgInterface}`);
+    execSync(`ip netns exec ${namespace} ip link set ${wgInterface} up`);
 
-  // 라우팅 설정
-  execSync(`ip netns exec ${namespace} ip route add default dev ${wgInterface}`);
+    // 라우팅 설정
+    step('라우팅 설정...');
+    execSync(`ip netns exec ${namespace} ip route add default dev ${wgInterface}`);
 
-  // DNS 설정
-  const dnsDir = `/etc/netns/${namespace}`;
-  if (!fs.existsSync(dnsDir)) {
-    fs.mkdirSync(dnsDir, { recursive: true });
+    // DNS 설정
+    step('DNS 설정...');
+    const dnsDir = `/etc/netns/${namespace}`;
+    if (!fs.existsSync(dnsDir)) {
+      fs.mkdirSync(dnsDir, { recursive: true });
+    }
+    fs.writeFileSync(`${dnsDir}/resolv.conf`, 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n');
+
+    step('설정 완료 ✓');
+  } catch (error) {
+    vpnLog(agentId, `❌ 네임스페이스 설정 실패: ${error.message}`);
+    // 정리
+    try {
+      execSync(`ip link del ${wgInterface} 2>/dev/null || true`, { stdio: 'pipe' });
+      execSync(`ip netns del ${namespace} 2>/dev/null || true`, { stdio: 'pipe' });
+    } catch (e) {}
+    throw error;
   }
-  fs.writeFileSync(`${dnsDir}/resolv.conf`, 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n');
 }
 
 // VPN 공인 IP 확인
