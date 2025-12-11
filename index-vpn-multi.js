@@ -465,6 +465,14 @@ class VpnInstance {
         cleanupVpn(this.namespace, this.wgInterface);
       }
 
+      // 재시도 (catch에서도 재시도 허용)
+      if (retryCount < MAX_RETRIES) {
+        const delay = 3000 + retryCount * 2000; // 3초, 5초, 7초
+        vpnLog(this.agentId, `${delay/1000}초 후 재시도... (${retryCount + 1}/${MAX_RETRIES})`);
+        await new Promise(r => setTimeout(r, delay));
+        return this.connect(retryCount + 1);
+      }
+
       return false;
     }
   }
@@ -1087,13 +1095,21 @@ async function main() {
   process.on('SIGTERM', cleanup);
 
   try {
-    // 1. 모든 VPN 동시 연결 (동글 동적 할당)
-    log(`${options.vpnCount}개 VPN 동시 연결 시작 (동글 동적 할당)...`);
+    // 1. VPN 순차 연결 (1초 간격으로 시작하여 429 에러 방지)
+    log(`${options.vpnCount}개 VPN 순차 연결 시작 (동글 동적 할당, 1초 간격)...`);
     console.log('');
 
-    const connectResults = await Promise.all(
-      vpnInstances.map(instance => instance.connect())
-    );
+    const connectResults = [];
+    for (let i = 0; i < vpnInstances.length; i++) {
+      const instance = vpnInstances[i];
+      const result = await instance.connect();
+      connectResults.push(result);
+
+      // 마지막이 아니면 1초 대기 (API 과부하 방지)
+      if (i < vpnInstances.length - 1) {
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
 
     const connectedCount = connectResults.filter(r => r).length;
     console.log('');
