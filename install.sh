@@ -58,6 +58,16 @@ if command -v apt-get &> /dev/null; then
     fi
 
     echo "✅ Chrome 의존성 및 WireGuard 설치 완료"
+
+    # WireGuard 커널 모듈 로드
+    echo "   WireGuard 커널 모듈 로드 중..."
+    sudo modprobe wireguard 2>/dev/null || true
+
+    # 부팅 시 자동 로드 설정
+    if [ ! -f /etc/modules-load.d/wireguard.conf ]; then
+        echo wireguard | sudo tee /etc/modules-load.d/wireguard.conf > /dev/null
+        echo "   ✅ WireGuard 자동 로드 설정 완료"
+    fi
     echo ""
 fi
 
@@ -87,4 +97,17 @@ echo "  node index.js --threads 4 --status"
 echo ""
 echo "도움말:"
 echo "  node index.js --help"
+echo ""
+
+# VPN 모드 사용 시 sudoers 설정 필요
+# node와 ip 명령어를 비밀번호 없이 실행하기 위함
+# sudo bash -c 'echo "tech ALL=(ALL) NOPASSWD: /usr/bin/node, /usr/sbin/ip, /sbin/ip" > /etc/sudoers.d/tech-nopasswd && chmod 440 /etc/sudoers.d/tech-nopasswd'
+
+echo "=========================================="
+echo "⚠️  VPN 모드 사용 시 추가 설정 필요:"
+echo "=========================================="
+echo ""
+echo "다음 명령어로 sudoers 설정 (비밀번호 없이 실행 허용):"
+echo ""
+echo "  sudo bash -c 'echo \"\$(whoami) ALL=(ALL) NOPASSWD: /usr/bin/node, /usr/sbin/ip, /sbin/ip\" > /etc/sudoers.d/\$(whoami)-nopasswd && chmod 440 /etc/sudoers.d/\$(whoami)-nopasswd'"
 echo ""
