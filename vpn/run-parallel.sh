@@ -68,6 +68,14 @@ if [ -n "$DISPLAY" ]; then
     xhost + >/dev/null 2>&1 || true
 fi
 
+# 실제 IP 조회 (VPN 연결 전에 조회)
+echo -e "${GREEN}[PARALLEL]${NC} 실제 IP 조회 중..."
+REAL_IP=$(curl -s --connect-timeout 5 http://mkt.techb.kr/ip 2>/dev/null || echo "")
+if [ -z "$REAL_IP" ]; then
+    REAL_IP=$(curl -s --connect-timeout 5 http://ifconfig.me 2>/dev/null || echo "unknown")
+fi
+echo -e "${GREEN}[PARALLEL]${NC} 실제 IP: ${REAL_IP}"
+
 # PID 저장 배열
 declare -A PIDS
 
@@ -118,6 +126,7 @@ for DONGLE in "${DONGLES[@]}"; do
             PATH="$PATH" \
             VPN_NAMESPACE="$NAMESPACE" \
             VPN_INDEX="$INDEX" \
+            REAL_IP="$REAL_IP" \
             node index-vpn.js --vpn=$DONGLE --thread-index=$INDEX $EXTRA_OPTS 2>&1 | \
             while IFS= read -r line; do
                 echo -e "${CYAN}[VPN $DONGLE]${NC} $line"
