@@ -37,7 +37,8 @@ const { BatchAllocator, DongleAllocator, getEthernetIp } = require('./lib/module
 // 설정
 const DEFAULT_VPN_COUNT = 10;  // 기본 VPN 개수
 const DEFAULT_THREADS_PER_VPN = 8;  // VPN당 8쓰레드
-const HOSTNAME = os.hostname();  // 예: "U22-01"
+// hostname에서 "tech-" prefix 제거 (tech-U22-03 → U22-03)
+const HOSTNAME = os.hostname().replace(/^tech-/i, '');  // 예: "U22-03"
 
 // 전역 디버그 모드 (--debug 옵션으로 활성화)
 let DEBUG_MODE = false;
@@ -328,8 +329,9 @@ class VpnInstance {
       vpnLog(this.agentId, `동글 할당됨: dongle=${this.dongleNumber}, server=${this.dongleInfo.serverIp}`);
 
       // 2. 네임스페이스/인터페이스 이름 설정
+      // 인터페이스 이름은 15자 제한이므로 동글 번호 사용 (wg-16 등)
       this.namespace = `vpn-${this.agentId}`;
-      this.wgInterface = `wg-${this.agentId}`;
+      this.wgInterface = `wg-${this.dongleNumber}`;
 
       // 3. WireGuard 설정 생성
       const wgConfig = DongleAllocator.createWgConfig(this.dongleInfo);
@@ -385,7 +387,7 @@ class VpnInstance {
 
       this.dongleNumber = this.dongleInfo.dongleNumber;
       this.namespace = `vpn-${this.agentId}`;
-      this.wgInterface = `wg-${this.agentId}`;
+      this.wgInterface = `wg-${this.dongleNumber}`;  // 15자 제한
 
       // WireGuard 설정 생성 및 적용
       const wgConfig = DongleAllocator.createWgConfig(this.dongleInfo);
