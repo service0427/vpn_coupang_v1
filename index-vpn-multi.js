@@ -481,9 +481,9 @@ class VpnInstance {
       proc.stdout.on('data', (data) => {
         const text = data.toString();
         stdout += text;
-        // 디버그 모드: 실시간 출력
+        // 디버그 모드: 실시간 출력 (__RESULT__: 마커는 제외)
         if (DEBUG_MODE) {
-          text.split('\n').filter(l => l.trim()).forEach(line => {
+          text.split('\n').filter(l => l.trim() && !l.startsWith('__RESULT__:')).forEach(line => {
             vpnLog(this.agentId, `[T${threadNum}] ${line}`);
           });
         }
@@ -550,15 +550,15 @@ class VpnInstance {
           return;
         }
 
-        // 결과 파싱 (stdout에서 JSON 결과 찾기)
+        // 결과 파싱 (stdout에서 __RESULT__: 마커 찾기)
         try {
-          // JSON 형식인 줄을 역순으로 찾기 (마지막에 다른 로그가 있을 수 있음)
           const lines = stdout.trim().split('\n');
           let jsonLine = null;
           for (let i = lines.length - 1; i >= 0; i--) {
             const line = lines[i].trim();
-            if (line.startsWith('{') && line.endsWith('}')) {
-              jsonLine = line;
+            // __RESULT__: 마커로 시작하는 줄 찾기
+            if (line.startsWith('__RESULT__:')) {
+              jsonLine = line.substring('__RESULT__:'.length);
               break;
             }
           }
