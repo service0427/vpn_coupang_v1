@@ -339,6 +339,9 @@ class VpnInstance {
     this.running = false;
     this.shouldStop = false;
 
+    // 토글 이후 성공 카운터 (50회 이상이면 예방적 토글)
+    this.successSinceToggle = 0;
+
     // BatchAllocator (작업 할당용)
     this.allocator = null;
   }
@@ -476,6 +479,46 @@ class VpnInstance {
       await dongleAllocator.release(this.agentId, this.dongleInfo.id);
       this.dongleInfo = null;
     }
+  }
+
+  // 동글 연장 (타임아웃 방지)
+  async extendDongle() {
+    if (this.dongleInfo) {
+      const success = await dongleAllocator.extend(this.agentId, this.dongleInfo.id);
+      if (success) {
+        vpnLog(this.agentId, `📌 동글 연장 완료 (dongle=${this.dongleNumber})`);
+      }
+      return success;
+    }
+    return false;
+  }
+
+  // IP 토글 (차단 대응 또는 예방적 변경)
+  async toggleIp() {
+    if (this.dongleInfo) {
+      vpnLog(this.agentId, `🔄 IP 토글 요청 (dongle=${this.dongleNumber})...`);
+      const success = await dongleAllocator.toggle(this.agentId, this.dongleInfo.id);
+      if (success) {
+        // 토글 후 IP가 변경되므로 잠시 대기 후 새 IP 확인
+        await new Promise(r => setTimeout(r, 3000));
+        const newIp = getVpnPublicIp(this.namespace, this.wgInterface);
+        if (newIp && newIp !== this.vpnIp) {
+          vpnLog(this.agentId, `✅ IP 변경됨: ${this.vpnIp} → ${newIp}`);
+          this.vpnIp = newIp;
+          // BatchAllocator에 새 IP 업데이트
+          if (this.allocator) {
+            this.allocator.setExternalIp(newIp);
+          }
+        } else {
+          vpnLog(this.agentId, `⚠️ IP 변경 확인 실패 (현재: ${this.vpnIp})`);
+        }
+        // 토글 후 성공 카운터 리셋
+        this.successSinceToggle = 0;
+        return true;
+      }
+      return false;
+    }
+    return false;
   }
 
   /**
@@ -801,12 +844,20 @@ class VpnInstance {
 
       if (this.shouldStop) break;
 
-      // 스코어 체크 → 재연결 필요시 동글 재할당
-      // 조건: score < 2 이고, 실제로 작업이 있었을 때 (차단 포함)
       const hasWork = result.stats.success + result.stats.fail + result.stats.blocked > 0;
+
+      // 성공 카운터 업데이트
+      this.successSinceToggle += result.stats.success;
+
+      // ========================================
+      // 조건 1: 차단이 많아서 스코어 < 2 → IP 토글 후 동글 재할당
+      // ========================================
       if (result.shouldToggle && hasWork) {
-        vpnLog(this.agentId, `스코어 ${result.score} < 2 (차단:${result.stats.blocked}) → 동글 재할당 실행`);
+        vpnLog(this.agentId, `스코어 ${result.score} < 2 (차단:${result.stats.blocked}) → IP 토글 후 동글 재할당`);
         this.totalStats.toggleCount++;
+
+        // 먼저 IP 토글 시도 (반납 전에 IP 변경)
+        await this.toggleIp();
 
         // VPN 재연결 (새 동글 할당) - 최대 3회 재시도
         let reconnected = false;
@@ -823,6 +874,31 @@ class VpnInstance {
           vpnLog(this.agentId, '❌ VPN 재연결 3회 실패 → 루프 종료');
           break;  // 더 이상 진행 불가, 루프 종료
         }
+
+        // 토글 후 성공 카운터 리셋
+        this.successSinceToggle = 0;
+      }
+      // ========================================
+      // 조건 2: 성공 50회 이상 → 예방적 IP 토글 (동글 유지)
+      // ========================================
+      else if (this.successSinceToggle >= 50) {
+        vpnLog(this.agentId, `✨ 성공 ${this.successSinceToggle}회 → 예방적 IP 토글`);
+        this.totalStats.toggleCount++;
+
+        // IP 토글만 (동글 재할당 없이)
+        const toggled = await this.toggleIp();
+        if (!toggled) {
+          vpnLog(this.agentId, `⚠️ IP 토글 실패 → 동글 재할당 시도`);
+          await this.reconnect();
+        }
+        // successSinceToggle은 toggleIp() 내부에서 리셋됨
+      }
+      // ========================================
+      // 조건 3: 정상 진행 중 → 동글 연장 (타임아웃 방지)
+      // ========================================
+      else if (hasWork && !result.shouldToggle) {
+        // 정상적으로 작업 완료 → 동글 연장 알림
+        await this.extendDongle();
       }
 
       // onceMode면 1회 실행 후 종료
@@ -832,7 +908,7 @@ class VpnInstance {
       }
 
       // 작업이 없었으면 10초 대기, 있었으면 2초 대기
-      const waitTime = (result.stats.success + result.stats.fail + result.stats.blocked === 0) ? 10000 : 2000;
+      const waitTime = hasWork ? 2000 : 10000;
       await new Promise(r => setTimeout(r, waitTime));
     }
 
