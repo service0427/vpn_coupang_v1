@@ -166,9 +166,28 @@ function setupVpnNamespace(namespace, wgInterface, config, agentId) {
   const step = (msg) => DEBUG_MODE && vpnLog(agentId, `  [setup] ${msg}`);
 
   try {
-    // 기존 정리
+    // 기존 정리 (철저하게)
     step('기존 네임스페이스 정리...');
+
+    // 1. 네임스페이스가 존재하면 내부 wg 인터페이스 먼저 삭제
+    try {
+      const nsExists = execSync(`ip netns list 2>/dev/null | grep -q "^${namespace}" && echo yes || echo no`, {
+        encoding: 'utf8'
+      }).trim();
+      if (nsExists === 'yes') {
+        // 네임스페이스 내의 모든 wg 인터페이스 삭제
+        const nsLinks = execSync(`ip -n ${namespace} link show 2>/dev/null || true`, { encoding: 'utf8' });
+        const wgInNs = nsLinks.match(/wg-\d+/g) || [];
+        for (const wg of wgInNs) {
+          execSync(`ip -n ${namespace} link del ${wg} 2>/dev/null || true`, { stdio: 'pipe' });
+        }
+      }
+    } catch (e) {}
+
+    // 2. 네임스페이스 삭제
     execSync(`ip netns del ${namespace} 2>/dev/null || true`, { stdio: 'pipe' });
+
+    // 3. 새로 만들 wgInterface가 메인에 있으면 삭제
     execSync(`ip link del ${wgInterface} 2>/dev/null || true`, { stdio: 'pipe' });
 
     // 네임스페이스 생성
@@ -228,8 +247,8 @@ PersistentKeepalive = 25
   }
 }
 
-// VPN 공인 IP 확인
-function getVpnPublicIp(namespace, wgInterface) {
+// VPN 공인 IP 확인 (단순 버전 - 블로킹 없음)
+function getVpnPublicIp(namespace) {
   try {
     const ip = execSync(`ip netns exec ${namespace} curl -s --max-time 10 https://api.ipify.org`, {
       encoding: 'utf8',
@@ -237,16 +256,6 @@ function getVpnPublicIp(namespace, wgInterface) {
     }).trim();
     return ip;
   } catch (e) {
-    // 실패 시 WireGuard 상태 출력 (디버깅용)
-    try {
-      const wgStatus = execSync(`ip netns exec ${namespace} wg show ${wgInterface || ''} 2>&1`, {
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
-      console.log(`[DEBUG] WireGuard 상태:\n${wgStatus}`);
-    } catch (e2) {
-      console.log(`[DEBUG] WireGuard 상태 확인 실패: ${e2.message}`);
-    }
     return null;
   }
 }
@@ -268,8 +277,20 @@ let activeVpnInstances = [];
 
 // 모든 VPN 네임스페이스 정리 (프로그램 시작/종료 시)
 function cleanupAllVpns() {
+  log('🧹 기존 VPN 정리 시작...');
+  let cleanedCount = 0;
+
   try {
-    // 현재 존재하는 모든 vpn- 네임스페이스 찾기
+    // 1. 모든 wg- 인터페이스 삭제 (네임스페이스 밖에 있는 것들)
+    try {
+      const interfaces = execSync('ip link show 2>/dev/null || true', { encoding: 'utf8' });
+      const wgInterfaces = interfaces.match(/wg-\d+/g) || [];
+      for (const wg of wgInterfaces) {
+        execSync(`ip link del ${wg} 2>/dev/null || true`, { stdio: 'pipe' });
+      }
+    } catch (e) {}
+
+    // 2. 현재 존재하는 모든 vpn- 네임스페이스 찾기
     const namespaces = execSync('ip netns list 2>/dev/null || true', { encoding: 'utf8' })
       .split('\n')
       .filter(ns => ns.trim().startsWith('vpn-'))
@@ -277,9 +298,16 @@ function cleanupAllVpns() {
 
     for (const ns of namespaces) {
       try {
-        // 해당 네임스페이스의 WireGuard 인터페이스 정리
-        const wgInterface = `wg-${ns.replace('vpn-', '')}`;
-        execSync(`ip -n ${ns} link del ${wgInterface} 2>/dev/null || true`, { stdio: 'pipe' });
+        // 네임스페이스 내의 모든 wg- 인터페이스 삭제
+        try {
+          const nsInterfaces = execSync(`ip -n ${ns} link show 2>/dev/null || true`, { encoding: 'utf8' });
+          const wgInNs = nsInterfaces.match(/wg-\d+/g) || [];
+          for (const wg of wgInNs) {
+            execSync(`ip -n ${ns} link del ${wg} 2>/dev/null || true`, { stdio: 'pipe' });
+          }
+        } catch (e) {}
+
+        // 네임스페이스 삭제
         execSync(`ip netns del ${ns} 2>/dev/null || true`, { stdio: 'pipe' });
 
         // DNS 설정 파일 정리
@@ -287,14 +315,19 @@ function cleanupAllVpns() {
         if (fs.existsSync(dnsDir)) {
           fs.rmSync(dnsDir, { recursive: true, force: true });
         }
+
+        cleanedCount++;
       } catch (e) {}
     }
 
-    if (namespaces.length > 0) {
-      log(`기존 VPN 네임스페이스 ${namespaces.length}개 정리 완료`);
-    }
+    // 3. VPN 관련 Chrome 프로세스 정리
+    try {
+      execSync('pkill -9 -f "browser-data/vpn_" 2>/dev/null || true', { stdio: 'pipe' });
+    } catch (e) {}
+
+    log(`🧹 기존 VPN 정리 완료 (${cleanedCount}개 정리됨)`);
   } catch (e) {
-    // 무시
+    log(`🧹 기존 VPN 정리 완료 (오류 무시)`);
   }
 }
 
@@ -342,13 +375,18 @@ class VpnInstance {
     // 토글 이후 성공 카운터 (50회 이상이면 예방적 토글)
     this.successSinceToggle = 0;
 
+    // 연속 작업없음 카운터 (3회 이상이면 반납+재할당)
+    this.noWorkCount = 0;
+
     // BatchAllocator (작업 할당용)
     this.allocator = null;
   }
 
-  async connect() {
+  async connect(retryCount = 0) {
+    const MAX_RETRIES = 3;
+
     try {
-      vpnLog(this.agentId, '동글 할당 요청 중...');
+      vpnLog(this.agentId, `동글 할당 요청 중...${retryCount > 0 ? ` (재시도 ${retryCount}/${MAX_RETRIES})` : ''}`);
 
       // 1. 서버에서 동글 할당받기
       this.dongleInfo = await dongleAllocator.allocate(this.agentId);
@@ -360,7 +398,6 @@ class VpnInstance {
       vpnLog(this.agentId, `동글 할당됨: dongle=${this.dongleNumber}, server=${this.dongleInfo.serverIp}`);
 
       // 2. 네임스페이스/인터페이스 이름 설정
-      // 인터페이스 이름은 15자 제한이므로 동글 번호 사용 (wg-16 등)
       this.namespace = `vpn-${this.agentId}`;
       this.wgInterface = `wg-${this.dongleNumber}`;
 
@@ -372,11 +409,29 @@ class VpnInstance {
       setupVpnNamespace(this.namespace, this.wgInterface, wgConfig, this.agentId);
       this.connected = true;
 
-      // 5. VPN 공인 IP 확인
-      const vpnIp = getVpnPublicIp(this.namespace, this.wgInterface);
+      // 5. VPN 공인 IP 확인 (필수! 실패 시 토글+반납+재시도)
+      const vpnIp = getVpnPublicIp(this.namespace);
       if (!vpnIp) {
-        throw new Error('VPN 연결 확인 실패');
+        vpnLog(this.agentId, `❌ IP 확인 실패 → 토글 후 재시도`);
+
+        // IP 토글
+        await dongleAllocator.toggle(this.dongleInfo.serverIp, this.dongleNumber);
+
+        // VPN 정리 및 동글 반납
+        cleanupVpn(this.namespace, this.wgInterface);
+        await dongleAllocator.release(this.agentId, this.dongleInfo.id);
+        this.dongleInfo = null;
+        this.dongleNumber = null;
+        this.connected = false;
+
+        // 재시도
+        if (retryCount < MAX_RETRIES) {
+          await new Promise(r => setTimeout(r, 2000));
+          return this.connect(retryCount + 1);
+        }
+        throw new Error('IP 확인 실패 (최대 재시도 초과)');
       }
+
       this.vpnIp = vpnIp;
       vpnLog(this.agentId, `연결됨 - 공인 IP: ${vpnIp}`);
 
@@ -393,7 +448,7 @@ class VpnInstance {
     } catch (err) {
       vpnLog(this.agentId, `연결 실패: ${err.message}`);
 
-      // 연결 실패 시 동글 반납 (다른 에이전트가 사용할 수 있도록)
+      // 연결 실패 시 동글 반납
       if (this.dongleInfo) {
         vpnLog(this.agentId, `연결 실패로 동글 반납: dongle=${this.dongleNumber}`);
         try {
@@ -414,62 +469,37 @@ class VpnInstance {
     }
   }
 
-  // VPN 재연결 (동글 재할당)
+  // VPN 재연결 (기존 정리 후 connect() 재사용)
   async reconnect() {
-    try {
-      vpnLog(this.agentId, 'VPN 재연결 중...');
+    vpnLog(this.agentId, 'VPN 재연결 중...');
 
-      // 1. 기존 VPN 연결 정리
-      if (this.namespace && this.wgInterface) {
-        cleanupVpn(this.namespace, this.wgInterface);
-      }
-      this.connected = false;
-
-      // 2. 기존 동글 반납 (중요! 반납 후 새 동글 할당받아야 함)
-      if (this.dongleInfo) {
-        vpnLog(this.agentId, `기존 동글 반납: dongle=${this.dongleNumber}`);
-        await dongleAllocator.release(this.agentId, this.dongleInfo.id);
-        this.dongleInfo = null;
-        this.dongleNumber = null;
-      }
-
-      // 3. 잠시 대기 (서버 처리 시간)
-      await new Promise(r => setTimeout(r, 2000));
-
-      // 4. 새 동글 할당 요청
-      vpnLog(this.agentId, '새 동글 할당 요청...');
-      this.dongleInfo = await dongleAllocator.allocate(this.agentId);
-      if (!this.dongleInfo) {
-        throw new Error('동글 재할당 실패');
-      }
-
-      this.dongleNumber = this.dongleInfo.dongleNumber;
-      this.namespace = `vpn-${this.agentId}`;
-      this.wgInterface = `wg-${this.dongleNumber}`;  // 15자 제한
-
-      // WireGuard 설정 생성 및 적용
-      const wgConfig = DongleAllocator.createWgConfig(this.dongleInfo);
-      setupVpnNamespace(this.namespace, this.wgInterface, wgConfig, this.agentId);
-      this.connected = true;
-
-      const vpnIp = getVpnPublicIp(this.namespace, this.wgInterface);
-      if (!vpnIp) {
-        throw new Error('VPN 재연결 확인 실패');
-      }
-      this.vpnIp = vpnIp;
-      vpnLog(this.agentId, `재연결됨 - 새 IP: ${vpnIp}`);
-
-      // BatchAllocator에 새 IP 업데이트
-      if (this.allocator) {
-        this.allocator.setExternalIp(vpnIp);
-        this.allocator.setVpnId(`${this.dongleInfo.serverIp}_${this.dongleNumber}`);
-      }
-
-      return true;
-    } catch (err) {
-      vpnLog(this.agentId, `재연결 실패: ${err.message}`);
-      return false;
+    // 1. 기존 VPN 연결 정리
+    if (this.namespace && this.wgInterface) {
+      cleanupVpn(this.namespace, this.wgInterface);
     }
+    this.connected = false;
+
+    // 2. 기존 동글 반납
+    if (this.dongleInfo) {
+      vpnLog(this.agentId, `기존 동글 반납: dongle=${this.dongleNumber}`);
+      await dongleAllocator.release(this.agentId, this.dongleInfo.id);
+      this.dongleInfo = null;
+      this.dongleNumber = null;
+    }
+
+    // 3. 짧은 대기
+    await new Promise(r => setTimeout(r, 500));
+
+    // 4. connect() 호출 (토글+재시도 로직 포함)
+    const result = await this.connect();
+
+    // 5. BatchAllocator 업데이트 (connect 성공 시)
+    if (result && this.allocator && this.vpnIp) {
+      this.allocator.setExternalIp(this.vpnIp);
+      this.allocator.setVpnId(`${this.dongleInfo.serverIp}_${this.dongleNumber}`);
+    }
+
+    return result;
   }
 
   // 동글 반납
@@ -481,42 +511,23 @@ class VpnInstance {
     }
   }
 
-  // 동글 연장 (타임아웃 방지)
-  async extendDongle() {
+  // 동글 연장 (heartbeat - 타임아웃 방지)
+  async heartbeat() {
     if (this.dongleInfo) {
-      const success = await dongleAllocator.extend(this.agentId, this.dongleInfo.id);
-      if (success) {
-        vpnLog(this.agentId, `📌 동글 연장 완료 (dongle=${this.dongleNumber})`);
-      }
-      return success;
+      await dongleAllocator.heartbeat(this.dongleInfo.id);
     }
-    return false;
   }
 
-  // IP 토글 (차단 대응 또는 예방적 변경)
+  // IP 토글 요청 (토글 후 반납 → 재할당 필요)
   async toggleIp() {
     if (this.dongleInfo) {
       vpnLog(this.agentId, `🔄 IP 토글 요청 (dongle=${this.dongleNumber})...`);
-      const success = await dongleAllocator.toggle(this.agentId, this.dongleInfo.id);
+      // GET http://{serverIp}/toggle/{dongleNumber}
+      const success = await dongleAllocator.toggle(this.dongleInfo.serverIp, this.dongleNumber);
       if (success) {
-        // 토글 후 IP가 변경되므로 잠시 대기 후 새 IP 확인
-        await new Promise(r => setTimeout(r, 3000));
-        const newIp = getVpnPublicIp(this.namespace, this.wgInterface);
-        if (newIp && newIp !== this.vpnIp) {
-          vpnLog(this.agentId, `✅ IP 변경됨: ${this.vpnIp} → ${newIp}`);
-          this.vpnIp = newIp;
-          // BatchAllocator에 새 IP 업데이트
-          if (this.allocator) {
-            this.allocator.setExternalIp(newIp);
-          }
-        } else {
-          vpnLog(this.agentId, `⚠️ IP 변경 확인 실패 (현재: ${this.vpnIp})`);
-        }
-        // 토글 후 성공 카운터 리셋
-        this.successSinceToggle = 0;
-        return true;
+        vpnLog(this.agentId, `✅ IP 토글 완료`);
       }
-      return false;
+      return success;
     }
     return false;
   }
@@ -792,6 +803,9 @@ class VpnInstance {
               )
             );
           }
+
+          // 4. 개별 작업 완료 후 heartbeat (동글 타임아웃 방지)
+          await this.heartbeat();
         } catch (submitErr) {
           vpnLog(this.agentId, `[T${threadNum}] ⚠️ 결과 제출 실패: ${submitErr.message}`);
         }
@@ -807,12 +821,12 @@ class VpnInstance {
       } else if (result.blocked) {
         this.stats.blocked++;
       } else {
-        this.stats.fail++;
+        this.stats.fail++;  // 타임아웃 포함
       }
     }
 
-    // 스코어 계산: 성공/실패 +1, 차단 -1
-    this.score = (this.stats.success + this.stats.fail) - this.stats.blocked;
+    // 스코어 계산: 성공 +1, 실패 0, 차단 -1
+    this.score = this.stats.success - this.stats.blocked;
 
     // 누적 통계
     this.totalStats.success += this.stats.success;
@@ -821,22 +835,20 @@ class VpnInstance {
     this.totalStats.taskCount += taskCount;
     this.totalStats.runCount++;
 
-    const scoreStatus = this.score < 2 ? '⚠️ 재연결필요' : '✅';
+    const scoreStatus = this.score <= -2 ? '⚠️ 재할당필요' : '✅';
     vpnLog(this.agentId, `사이클 #${runNum} 완료 - 성공:${this.stats.success} 실패:${this.stats.fail} 차단:${this.stats.blocked} → 스코어:${this.score} ${scoreStatus}`);
 
     return {
       agentId: this.agentId,
       score: this.score,
       stats: { ...this.stats },
-      shouldToggle: this.score < 2
+      shouldToggle: this.score <= -2  // -2 이하면 토글+재할당
     };
   }
 
   // 독립 루프 실행 (각 VPN이 자체적으로 계속 돌아감)
   async runIndependentLoop() {
     this.running = true;
-
-    // 초기 IP 체크는 하지 않음 - 브라우저 실행 후 결과로 판단
 
     while (!this.shouldStop) {
       // 배치 사이클 1회 실행
@@ -846,20 +858,46 @@ class VpnInstance {
 
       const hasWork = result.stats.success + result.stats.fail + result.stats.blocked > 0;
 
+      // 작업 유무에 따른 카운터 관리
+      if (hasWork) {
+        this.noWorkCount = 0;  // 작업 있으면 리셋
+        // heartbeat은 각 작업 완료 시 개별 호출됨 (runBatchCycle 내부)
+      } else {
+        this.noWorkCount++;  // 작업 없으면 증가
+      }
+
       // 성공 카운터 업데이트
       this.successSinceToggle += result.stats.success;
 
       // ========================================
-      // 조건 1: 차단이 많아서 스코어 < 2 → IP 토글 후 동글 재할당
+      // 조건 0: 연속 3회 작업 없음 → 토글 + 반납 + 새 동글 할당
       // ========================================
-      if (result.shouldToggle && hasWork) {
-        vpnLog(this.agentId, `스코어 ${result.score} < 2 (차단:${result.stats.blocked}) → IP 토글 후 동글 재할당`);
-        this.totalStats.toggleCount++;
+      if (this.noWorkCount >= 3) {
+        vpnLog(this.agentId, `📭 연속 ${this.noWorkCount}회 작업 없음 → 토글 후 반납 + 새 동글 할당`);
+        this.noWorkCount = 0;
 
-        // 먼저 IP 토글 시도 (반납 전에 IP 변경)
+        // 1. IP 토글 (반납 전에)
         await this.toggleIp();
 
-        // VPN 재연결 (새 동글 할당) - 최대 3회 재시도
+        // 2. VPN 재연결 (반납 + 새 동글 할당)
+        const reconnected = await this.reconnect();
+        if (!reconnected) {
+          vpnLog(this.agentId, '❌ VPN 재연결 실패 → 10초 후 재시도');
+          await new Promise(r => setTimeout(r, 10000));
+          continue;
+        }
+      }
+      // ========================================
+      // 조건 1: 스코어 <= -2 → IP 토글 + 반납 + 재할당
+      // ========================================
+      else if (result.shouldToggle && hasWork) {
+        vpnLog(this.agentId, `스코어 ${result.score} <= -2 (차단:${result.stats.blocked}) → IP 토글 후 재할당`);
+        this.totalStats.toggleCount++;
+
+        // 1. IP 토글 (반납 전에)
+        await this.toggleIp();
+
+        // 2. VPN 재연결 (반납 + 새 동글 할당)
         let reconnected = false;
         for (let attempt = 1; attempt <= 3; attempt++) {
           reconnected = await this.reconnect();
@@ -872,34 +910,29 @@ class VpnInstance {
 
         if (!reconnected) {
           vpnLog(this.agentId, '❌ VPN 재연결 3회 실패 → 루프 종료');
-          break;  // 더 이상 진행 불가, 루프 종료
+          break;
         }
 
-        // 토글 후 성공 카운터 리셋
+        // 성공 카운터 리셋
         this.successSinceToggle = 0;
       }
       // ========================================
-      // 조건 2: 성공 50회 이상 → 예방적 IP 토글 (동글 유지)
+      // 조건 2: 성공 50회 이상 → IP 토글 + 반납 + 재할당
       // ========================================
       else if (this.successSinceToggle >= 50) {
-        vpnLog(this.agentId, `✨ 성공 ${this.successSinceToggle}회 → 예방적 IP 토글`);
+        vpnLog(this.agentId, `✨ 성공 ${this.successSinceToggle}회 → 예방적 토글 후 재할당`);
         this.totalStats.toggleCount++;
 
-        // IP 토글만 (동글 재할당 없이)
-        const toggled = await this.toggleIp();
-        if (!toggled) {
-          vpnLog(this.agentId, `⚠️ IP 토글 실패 → 동글 재할당 시도`);
-          await this.reconnect();
-        }
-        // successSinceToggle은 toggleIp() 내부에서 리셋됨
+        // 1. IP 토글 (반납 전에)
+        await this.toggleIp();
+
+        // 2. VPN 재연결 (반납 + 새 동글 할당)
+        await this.reconnect();
+
+        // 성공 카운터 리셋
+        this.successSinceToggle = 0;
       }
-      // ========================================
-      // 조건 3: 정상 진행 중 → 동글 연장 (타임아웃 방지)
-      // ========================================
-      else if (hasWork && !result.shouldToggle) {
-        // 정상적으로 작업 완료 → 동글 연장 알림
-        await this.extendDongle();
-      }
+      // 조건 3: 정상 → 계속 사용 (heartbeat은 위에서 이미 호출됨)
 
       // onceMode면 1회 실행 후 종료
       if (this.onceMode) {
