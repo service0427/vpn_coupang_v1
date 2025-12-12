@@ -489,20 +489,22 @@ class VpnInstance {
       setupVpnNamespace(this.namespace, this.wgInterface, wgConfig, this.agentId);
       this.connected = true;
 
-      // 5. VPN 공인 IP 확인 (필수! 실패 시 토글+반납+재시도)
+      // 5. VPN 공인 IP 확인 (필수! 실패 시 VPN정리→토글→반납→재시도)
       const vpnIp = getVpnPublicIp(this.namespace);
       if (!vpnIp) {
-        vpnLog(this.agentId, `❌ IP 확인 실패 → 토글 후 재시도`);
+        vpnLog(this.agentId, `❌ IP 확인 실패 → VPN 정리 후 토글+반납`);
 
-        // IP 토글
+        // 1. 먼저 VPN 정리 (네임스페이스 삭제) - API 호출이 로컬 네트워크로 가도록
+        cleanupVpn(this.namespace, this.wgInterface);
+        this.connected = false;
+
+        // 2. IP 토글 (백그라운드 - VPN 끊긴 상태에서 호출)
         await dongleAllocator.toggle(this.dongleInfo.serverIp, this.dongleNumber);
 
-        // VPN 정리 및 동글 반납
-        cleanupVpn(this.namespace, this.wgInterface);
+        // 3. 동글 반납 (로컬 네트워크로 호출)
         await dongleAllocator.release(this.agentId, this.dongleInfo.id);
         this.dongleInfo = null;
         this.dongleNumber = null;
-        this.connected = false;
 
         // 재시도
         if (retryCount < MAX_RETRIES) {
