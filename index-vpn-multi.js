@@ -474,10 +474,11 @@ class VpnInstance {
       vpnLog(this.agentId, `동글 할당됨: dongle=${this.dongleNumber}, server=${this.dongleInfo.serverIp}`);
 
       // 2. 네임스페이스/인터페이스 이름 설정
-      // 형식: {agentId}-{dongleNumber} (예: U22-01-05-031)
-      // ip netns list로 어떤 에이전트가 어떤 동글을 쓰는지 바로 확인 가능
-      const dongleStr = String(this.dongleNumber).padStart(3, '0');
-      this.namespace = `${this.agentId}-${dongleStr}`;
+      // 형식: {agentId}-{dongleId} (예: U22-01-05-031)
+      // dongleId = 할당 ID (고유값), dongleNumber = 동글 번호 (중복 가능)
+      // ip netns list로 어떤 에이전트가 어떤 동글 할당을 쓰는지 바로 확인 가능
+      const dongleIdStr = String(this.dongleInfo.id).padStart(3, '0');
+      this.namespace = `${this.agentId}-${dongleIdStr}`;
       this.wgInterface = `wg-${this.dongleNumber}`;
 
       // 3. WireGuard 설정 생성
