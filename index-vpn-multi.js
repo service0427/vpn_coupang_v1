@@ -276,17 +276,51 @@ async function main() {
         await new Promise(r => setTimeout(r, index * 1000));
       }
 
-      // 연결 시도
-      const connected = await manager.connect();
-      if (!connected) {
-        vpnLog(agent.agentId, `❌ 연결 실패 - 이 VPN은 건너뜀`);
-        return { agent, connected: false };
-      }
+      // 무한 루프 (--once가 아닐 때)
+      let consecutiveFailures = 0;
+      const MAX_CONSECUTIVE_FAILURES = 3;
+      const RETRY_DELAY_SECONDS = 60;
 
-      // 연결 성공 → 즉시 독립 루프 시작 (다른 VPN 기다리지 않음)
-      vpnLog(agent.agentId, `✅ 연결됨 → 독립 루프 즉시 시작`);
-      await agent.runIndependentLoop();
-      return { agent, connected: true };
+      while (true) {
+        // 연결 시도
+        const connected = await manager.connect();
+
+        if (!connected) {
+          consecutiveFailures++;
+
+          if (options.once) {
+            // --once 모드: 실패하면 건너뜀
+            vpnLog(agent.agentId, `❌ 연결 실패 - 이 VPN은 건너뜀`);
+            return { agent, connected: false };
+          }
+
+          // 연속 모드: 재시도
+          if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            vpnLog(agent.agentId, `❌ ${consecutiveFailures}회 연속 연결 실패 → ${RETRY_DELAY_SECONDS}초 후 재시도`);
+            await new Promise(r => setTimeout(r, RETRY_DELAY_SECONDS * 1000));
+            consecutiveFailures = 0;  // 리셋
+          } else {
+            vpnLog(agent.agentId, `❌ 연결 실패 (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}) → 10초 후 재시도`);
+            await new Promise(r => setTimeout(r, 10000));
+          }
+          continue;  // 다시 시도
+        }
+
+        // 연결 성공 → 즉시 독립 루프 시작
+        consecutiveFailures = 0;
+        vpnLog(agent.agentId, `✅ 연결됨 → 독립 루프 즉시 시작`);
+        await agent.runIndependentLoop();
+
+        // --once 모드면 루프 종료
+        if (options.once) {
+          return { agent, connected: true };
+        }
+
+        // 연속 모드: runIndependentLoop이 끝났다면 (예: 예방적 토글로 종료)
+        // 잠시 대기 후 새 동글로 재연결
+        vpnLog(agent.agentId, `🔄 루프 종료 → 5초 후 새 동글 할당 시도`);
+        await new Promise(r => setTimeout(r, 5000));
+      }
     };
 
     // 모든 VPN을 병렬로 시작 (각각 독립적으로 연결 → 루프 실행)
