@@ -39,8 +39,25 @@ sudo apt-get install -y \
 
 ## 실행
 
+### VPN 멀티 모드 (권장)
+
 ```bash
-# API 모드 실행
+# 기본 실행: VPN 10개, 쓰레드 3개 (총 30개)
+sudo npm start
+
+# VPN 개수 조정
+sudo npm start -- -v 5           # VPN 5개
+
+# VPN + 쓰레드 조정
+sudo npm start -- -v 5 -t 2      # VPN 5개, 쓰레드 2개
+
+# 디버깅 (콘솔 로그 파일 저장)
+sudo npm start -- --debug 2>&1 | tee "logs/multi_$(date +%Y%m%d_%H%M%S).log"
+```
+
+### 일반 모드 (VPN 없이)
+
+```bash
 node index.js --threads 4          # 연속 실행
 node index.js --threads 4 --once   # 1회 실행
 ```

@@ -12,7 +12,12 @@
  * - 다른 VPN에 영향 없이 독립적으로 동작
  *
  * 사용법:
- *   sudo node index-vpn-multi.js [옵션]
+ *   sudo npm start              # 기본: VPN 10개, 쓰레드 3개
+ *   sudo npm start -- -v 5      # VPN 5개
+ *   sudo npm start -- -v 5 -t 2 # VPN 5개, 쓰레드 2개
+ *
+ * 디버깅 (콘솔 로그 파일 저장):
+ *   sudo npm start -- --debug 2>&1 | tee "logs/multi_$(date +%Y%m%d_%H%M%S).log"
  */
 
 const { execSync } = require('child_process');
@@ -28,7 +33,7 @@ const { WireGuardHelper, VpnManager, VpnAgent } = require('./lib/vpn');
 
 // 설정
 const DEFAULT_VPN_COUNT = 10;
-const DEFAULT_THREADS_PER_VPN = 8;
+const DEFAULT_THREADS_PER_VPN = 3;
 const HOSTNAME = os.hostname().replace(/^tech-/i, '');
 
 // 전역 디버그 모드
@@ -91,11 +96,15 @@ function parseArgs() {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '--help') options.help = true;
+    if (arg === '--help' || arg === '-h') options.help = true;
     else if (arg === '--once') options.once = true;
     else if (arg === '--debug') options.debug = true;
+    // VPN 개수: -v, --vpn-count, --vpn-count=N
+    else if (arg === '-v' && args[i + 1]) options.vpnCount = parseInt(args[++i]);
     else if (arg.startsWith('--vpn-count=')) options.vpnCount = parseInt(arg.split('=')[1]);
     else if (arg === '--vpn-count' && args[i + 1]) options.vpnCount = parseInt(args[++i]);
+    // 쓰레드 수: -t, --threads, --threads=N
+    else if (arg === '-t' && args[i + 1]) options.threadsPerVpn = parseInt(args[++i]);
     else if (arg.startsWith('--threads=')) options.threadsPerVpn = parseInt(arg.split('=')[1]);
     else if (arg === '--threads' && args[i + 1]) options.threadsPerVpn = parseInt(args[++i]);
   }
@@ -114,14 +123,18 @@ agent_id 형식: ${HOSTNAME}-{순번}
   예: ${HOSTNAME}-01, ${HOSTNAME}-02, ...
 
 사용법:
-  sudo node index-vpn-multi.js [옵션]
+  sudo node index-vpn-multi.js              # 기본값으로 실행
+  sudo node index-vpn-multi.js -v 5 -t 2    # VPN 5개, 쓰레드 2개
 
 옵션:
-  --vpn-count <n>  VPN 개수 (1~10, 기본: ${DEFAULT_VPN_COUNT})
-  --threads <n>    VPN당 쓰레드 수 (1~8, 기본: ${DEFAULT_THREADS_PER_VPN})
-  --once           1회만 실행 후 종료
-  --debug          디버그 모드
-  --help           도움말 표시
+  -v, --vpn-count <n>  VPN 개수 (1~10, 기본: ${DEFAULT_VPN_COUNT})
+  -t, --threads <n>    VPN당 쓰레드 수 (1~8, 기본: ${DEFAULT_THREADS_PER_VPN})
+  --once               1회만 실행 후 종료
+  --debug              디버그 모드
+  -h, --help           도움말 표시
+
+디버깅:
+  sudo node index-vpn-multi.js --debug 2>&1 | tee "logs/multi_$(date +%Y%m%d_%H%M%S).log"
 `);
 }
 
@@ -359,6 +372,7 @@ function printFinalStats(agents) {
   console.log('═══════════════════════════════════════════════════════════════');
 
   let grandTotal = { success: 0, fail: 0, blocked: 0, toggleCount: 0, runCount: 0, taskCount: 0 };
+  let vpnTotals = { connectAttempts: 0, connectSuccesses: 0, dongleAllocations: 0, totalConnectTime: 0 };
 
   for (const agent of agents) {
     const s = agent.getTotalStats();
@@ -369,11 +383,40 @@ function printFinalStats(agents) {
     grandTotal.runCount += s.runCount;
     grandTotal.taskCount += s.taskCount || 0;
 
-    vpnLog(agent.agentId, `사이클:${s.runCount}회 작업:${s.taskCount || 0}개 성공:${s.success} 실패:${s.fail} 차단:${s.blocked} 재연결:${s.toggleCount}회`);
+    // VPN 통계 수집
+    const vpnStats = agent.vpnManager?.getStats();
+    if (vpnStats) {
+      vpnTotals.connectAttempts += vpnStats.connectAttempts;
+      vpnTotals.connectSuccesses += vpnStats.connectSuccesses;
+      vpnTotals.dongleAllocations += vpnStats.dongleAllocations;
+      vpnTotals.totalConnectTime += vpnStats.timing.totalConnectTime;
+    }
+
+    // 작업 통계
+    const successRate = s.taskCount > 0 ? ((s.success / s.taskCount) * 100).toFixed(1) : '0.0';
+    vpnLog(agent.agentId, `사이클:${s.runCount}회 작업:${s.taskCount || 0}개 성공:${s.success}(${successRate}%) 실패:${s.fail} 차단:${s.blocked} 토글:${s.toggleCount}회`);
   }
 
   console.log('');
-  log(`전체 총계 - 사이클:${grandTotal.runCount}회 작업:${grandTotal.taskCount}개 성공:${grandTotal.success} 실패:${grandTotal.fail} 차단:${grandTotal.blocked} 재연결:${grandTotal.toggleCount}회`);
+  console.log('───────────────────────────────────────────────────────────────');
+
+  // 작업 통계
+  const totalSuccessRate = grandTotal.taskCount > 0
+    ? ((grandTotal.success / grandTotal.taskCount) * 100).toFixed(1)
+    : '0.0';
+  log(`📋 작업 총계: ${grandTotal.taskCount}개 | 성공: ${grandTotal.success} (${totalSuccessRate}%) | 실패: ${grandTotal.fail} | 차단: ${grandTotal.blocked}`);
+
+  // VPN 통계
+  const avgConnectTime = vpnTotals.connectSuccesses > 0
+    ? Math.round(vpnTotals.totalConnectTime / vpnTotals.connectSuccesses)
+    : 0;
+  const connectSuccessRate = vpnTotals.connectAttempts > 0
+    ? ((vpnTotals.connectSuccesses / vpnTotals.connectAttempts) * 100).toFixed(1)
+    : '0.0';
+  log(`🔌 VPN 연결: ${vpnTotals.connectSuccesses}/${vpnTotals.connectAttempts}회 (${connectSuccessRate}%) | 평균 연결시간: ${avgConnectTime}ms`);
+  log(`🔄 토글: ${grandTotal.toggleCount}회 | 동글 할당: ${vpnTotals.dongleAllocations}회`);
+
+  console.log('═══════════════════════════════════════════════════════════════');
 }
 
 // 실행
