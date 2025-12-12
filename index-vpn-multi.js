@@ -34,6 +34,9 @@ const os = require('os');
 // API 클라이언트 import
 const { BatchAllocator, DongleAllocator, getEthernetIp } = require('./lib/modules/api-service');
 
+// VPN 모듈 import (리팩토링된 모듈)
+const { WireGuardHelper, TogglePolicy, ToggleReason } = require('./lib/vpn');
+
 // 설정
 const DEFAULT_VPN_COUNT = 10;  // 기본 VPN 개수
 const DEFAULT_THREADS_PER_VPN = 8;  // VPN당 8쓰레드
@@ -152,8 +155,9 @@ agent_id 형식: ${HOSTNAME}-{순번}
 `);
 }
 
-// 싱글톤 DongleAllocator 인스턴스
+// 싱글톤 인스턴스
 const dongleAllocator = new DongleAllocator();
+const wgHelper = new WireGuardHelper({ debug: DEBUG_MODE, logger: vpnLog });
 
 // agent_id 생성 헬퍼
 function createAgentId(vpnIndex) {
@@ -161,249 +165,37 @@ function createAgentId(vpnIndex) {
   return `${HOSTNAME}-${String(vpnIndex).padStart(2, '0')}`;
 }
 
-// VPN 네임스페이스 생성 및 연결 (새 API 기반)
+// VPN 네임스페이스 생성 및 연결 (WireGuardHelper 위임)
 function setupVpnNamespace(namespace, wgInterface, config, agentId) {
-  const step = (msg) => DEBUG_MODE && vpnLog(agentId, `  [setup] ${msg}`);
-
   try {
-    // 기존 정리 (철저하게)
-    step('기존 네임스페이스 정리...');
-
-    // 1. 네임스페이스가 존재하면 내부 wg 인터페이스 먼저 삭제
-    try {
-      const nsExists = execSync(`ip netns list 2>/dev/null | grep -q "^${namespace}" && echo yes || echo no`, {
-        encoding: 'utf8'
-      }).trim();
-      if (nsExists === 'yes') {
-        // 네임스페이스 내의 모든 wg 인터페이스 삭제
-        const nsLinks = execSync(`ip -n ${namespace} link show 2>/dev/null || true`, { encoding: 'utf8' });
-        const wgInNs = nsLinks.match(/wg-\d+/g) || [];
-        for (const wg of wgInNs) {
-          execSync(`ip -n ${namespace} link del ${wg} 2>/dev/null || true`, { stdio: 'pipe' });
-        }
-      }
-    } catch (e) {}
-
-    // 2. 네임스페이스 삭제
-    execSync(`ip netns del ${namespace} 2>/dev/null || true`, { stdio: 'pipe' });
-
-    // 3. 새로 만들 wgInterface가 메인에 있으면 삭제
-    execSync(`ip link del ${wgInterface} 2>/dev/null || true`, { stdio: 'pipe' });
-
-    // 네임스페이스 생성
-    step('네임스페이스 생성...');
-    execSync(`ip netns add ${namespace}`);
-    execSync(`ip netns exec ${namespace} ip link set lo up`);
-
-    // WireGuard 인터페이스 생성
-    step(`WireGuard 인터페이스 생성: ${wgInterface}`);
-    execSync(`ip link add ${wgInterface} type wireguard`);
-    execSync(`ip link set ${wgInterface} netns ${namespace}`);
-
-    // WireGuard 설정 파일 생성
-    step('WireGuard 설정 적용...');
-    const tempConf = `/tmp/wg-${namespace}.conf`;
-    const wgConfig = `[Interface]
-PrivateKey = ${config.privateKey}
-
-[Peer]
-PublicKey = ${config.publicKey}
-Endpoint = ${config.endpoint}
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
-`;
-    fs.writeFileSync(tempConf, wgConfig);
-
-    // WireGuard 설정 적용
-    execSync(`ip netns exec ${namespace} wg setconf ${wgInterface} ${tempConf}`);
-    fs.unlinkSync(tempConf);
-
-    // IP 할당 및 활성화
-    step(`IP 할당: ${config.address}`);
-    execSync(`ip netns exec ${namespace} ip addr add ${config.address} dev ${wgInterface}`);
-    execSync(`ip netns exec ${namespace} ip link set ${wgInterface} up`);
-
-    // 라우팅 설정
-    step('라우팅 설정...');
-    execSync(`ip netns exec ${namespace} ip route add default dev ${wgInterface}`);
-
-    // DNS 설정
-    step('DNS 설정...');
-    const dnsDir = `/etc/netns/${namespace}`;
-    if (!fs.existsSync(dnsDir)) {
-      fs.mkdirSync(dnsDir, { recursive: true });
-    }
-    fs.writeFileSync(`${dnsDir}/resolv.conf`, 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n');
-
-    step('설정 완료 ✓');
+    wgHelper.setupNamespace(namespace, wgInterface, config, agentId);
   } catch (error) {
     vpnLog(agentId, `❌ 네임스페이스 설정 실패: ${error.message}`);
-    // 정리
-    try {
-      execSync(`ip link del ${wgInterface} 2>/dev/null || true`, { stdio: 'pipe' });
-      execSync(`ip netns del ${namespace} 2>/dev/null || true`, { stdio: 'pipe' });
-    } catch (e) {}
     throw error;
   }
 }
 
-// VPN 공인 IP 확인 (단순 버전 - 블로킹 없음)
+// VPN 공인 IP 확인 (WireGuardHelper 위임)
 function getVpnPublicIp(namespace) {
-  try {
-    const ip = execSync(`ip netns exec ${namespace} curl -s --max-time 10 https://api.ipify.org`, {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe']
-    }).trim();
-    return ip;
-  } catch (e) {
-    return null;
-  }
+  return wgHelper.getPublicIp(namespace);
 }
 
-// VPN 정리 (개별 네임스페이스)
+// VPN 정리 (개별 네임스페이스) - WireGuardHelper 위임
 function cleanupVpn(namespace, wgInterface) {
-  try {
-    // 1. 네임스페이스 내 프로세스 강제 종료
-    try {
-      const pids = execSync(`ip netns pids ${namespace} 2>/dev/null || true`, { encoding: 'utf8' })
-        .trim().split('\n').filter(p => p.trim());
-      for (const pid of pids) {
-        execSync(`kill -9 ${pid} 2>/dev/null || true`, { stdio: 'pipe' });
-      }
-    } catch (e) {}
-
-    // 2. 네임스페이스 내 모든 wg 인터페이스 삭제
-    try {
-      const nsInterfaces = execSync(`ip -n ${namespace} link show 2>/dev/null || true`, { encoding: 'utf8' });
-      const wgInNs = nsInterfaces.match(/wg-\d+/g) || [];
-      for (const wg of wgInNs) {
-        execSync(`ip -n ${namespace} link del ${wg} 2>/dev/null || true`, { stdio: 'pipe' });
-      }
-    } catch (e) {}
-
-    // 3. 특정 인터페이스도 삭제 시도
-    execSync(`ip -n ${namespace} link del ${wgInterface} 2>/dev/null || true`, { stdio: 'pipe' });
-
-    // 4. 네임스페이스 삭제
-    execSync(`ip netns del ${namespace} 2>/dev/null || true`, { stdio: 'pipe' });
-
-    // 5. DNS 설정 파일 정리
-    const dnsDir = `/etc/netns/${namespace}`;
-    if (fs.existsSync(dnsDir)) {
-      fs.rmSync(dnsDir, { recursive: true, force: true });
-    }
-
-    // 6. 전역 wg 인터페이스도 삭제 (혹시 남아있으면)
-    execSync(`ip link del ${wgInterface} 2>/dev/null || true`, { stdio: 'pipe' });
-  } catch (e) {}
+  wgHelper.cleanupNamespace(namespace, wgInterface);
 }
 
 // 활성 VPN 인스턴스 추적 (정리용)
 let activeVpnInstances = [];
 
-// 모든 VPN 네임스페이스 정리 (프로그램 시작/종료 시)
+// 모든 VPN 네임스페이스 정리 (프로그램 시작/종료 시) - WireGuardHelper 위임
 function cleanupAllVpns() {
   log('🧹 기존 VPN 정리 시작...');
-  let cleanedCount = 0;
-
-  try {
-    // 0. VPN 관련 모든 프로세스 먼저 종료 (네임스페이스 삭제 전 필수!)
-    try {
-      // VPN 네임스페이스 내에서 실행 중인 모든 프로세스 종료
-      // 새 형식: U22-XX-XX-XXX (호스트네임 기반)
-      execSync(`pkill -9 -f "ip netns exec ${HOSTNAME}" 2>/dev/null || true`, { stdio: 'pipe' });
-      // 기존 형식도 정리: vpn-
-      execSync('pkill -9 -f "ip netns exec vpn-" 2>/dev/null || true', { stdio: 'pipe' });
-      // Chrome 프로세스 종료
-      execSync('pkill -9 -f "browser-data/vpn_" 2>/dev/null || true', { stdio: 'pipe' });
-      // 잠시 대기 (프로세스 종료 완료 대기)
-      execSync('sleep 0.5', { stdio: 'pipe' });
-    } catch (e) {}
-
-    // 1. 모든 wg- 인터페이스 삭제 (네임스페이스 밖에 있는 것들)
-    try {
-      const interfaces = execSync('ip link show 2>/dev/null || true', { encoding: 'utf8' });
-      const wgInterfaces = interfaces.match(/wg-\d+/g) || [];
-      for (const wg of wgInterfaces) {
-        execSync(`ip link del ${wg} 2>/dev/null || true`, { stdio: 'pipe' });
-      }
-      if (wgInterfaces.length > 0) {
-        log(`  ├─ 전역 wg 인터페이스 ${wgInterfaces.length}개 삭제`);
-      }
-    } catch (e) {}
-
-    // 2. 현재 존재하는 모든 VPN 네임스페이스 찾기
-    // 새 형식: U22-XX-XX-XXX (호스트네임으로 시작)
-    // 기존 형식: vpn-U22-XX-XX
-    const nsList = execSync('ip netns list 2>/dev/null || true', { encoding: 'utf8' });
-    const namespaces = nsList
-      .split('\n')
-      .filter(ns => {
-        const name = ns.trim();
-        return name.startsWith(HOSTNAME) || name.startsWith('vpn-');
-      })
-      .map(ns => ns.split(' ')[0].trim())
-      .filter(ns => ns.length > 0);
-
-    if (namespaces.length === 0) {
-      log('🧹 기존 VPN 없음 - 정리 완료');
-      return;
-    }
-
-    log(`  ├─ ${namespaces.length}개 네임스페이스 발견: ${namespaces.join(', ')}`);
-
-    for (const ns of namespaces) {
-      try {
-        // 네임스페이스 내의 모든 인터페이스 삭제
-        try {
-          const nsInterfaces = execSync(`ip -n ${ns} link show 2>/dev/null || true`, { encoding: 'utf8' });
-          const wgInNs = nsInterfaces.match(/wg-\d+/g) || [];
-          for (const wg of wgInNs) {
-            execSync(`ip -n ${ns} link del ${wg} 2>/dev/null || true`, { stdio: 'pipe' });
-          }
-        } catch (e) {}
-
-        // 네임스페이스 내 프로세스 강제 종료 (SIGKILL)
-        try {
-          const pids = execSync(`ip netns pids ${ns} 2>/dev/null || true`, { encoding: 'utf8' })
-            .trim().split('\n').filter(p => p.trim());
-          for (const pid of pids) {
-            execSync(`kill -9 ${pid} 2>/dev/null || true`, { stdio: 'pipe' });
-          }
-        } catch (e) {}
-
-        // 네임스페이스 삭제 (강제)
-        execSync(`ip netns del ${ns}`, { stdio: 'pipe' });
-
-        // DNS 설정 파일 정리
-        const dnsDir = `/etc/netns/${ns}`;
-        if (fs.existsSync(dnsDir)) {
-          fs.rmSync(dnsDir, { recursive: true, force: true });
-        }
-
-        cleanedCount++;
-      } catch (e) {
-        warn(`  ├─ ⚠️ ${ns} 삭제 실패: ${e.message}`);
-      }
-    }
-
-    // 3. 삭제 확인
-    const remaining = execSync('ip netns list 2>/dev/null || true', { encoding: 'utf8' })
-      .split('\n')
-      .filter(ns => {
-        const name = ns.trim();
-        return name.startsWith(HOSTNAME) || name.startsWith('vpn-');
-      })
-      .map(ns => ns.split(' ')[0].trim())
-      .filter(ns => ns.length > 0);
-
-    if (remaining.length > 0) {
-      warn(`  └─ ⚠️ 삭제 실패한 네임스페이스: ${remaining.join(', ')}`);
-    } else {
-      log(`🧹 기존 VPN 정리 완료 (${cleanedCount}개 삭제됨)`);
-    }
-  } catch (e) {
-    warn(`🧹 기존 VPN 정리 중 오류: ${e.message}`);
+  const cleanedCount = wgHelper.cleanupAllNamespaces(HOSTNAME, { log, warn });
+  if (cleanedCount > 0) {
+    log(`🧹 기존 VPN 정리 완료 (${cleanedCount}개 삭제됨)`);
+  } else {
+    log('🧹 기존 VPN 없음 - 정리 완료');
   }
 }
 
@@ -456,6 +248,9 @@ class VpnInstance {
 
     // BatchAllocator (작업 할당용)
     this.allocator = null;
+
+    // 토글 정책 (중앙화된 조건 관리)
+    this.togglePolicy = new TogglePolicy();
   }
 
   async connect(retryCount = 0) {
@@ -921,8 +716,8 @@ class VpnInstance {
       }
     }
 
-    // 스코어 계산: 성공 +1, 실패 0, 차단 -1
-    this.score = this.stats.success - this.stats.blocked;
+    // 스코어 계산 (TogglePolicy 정적 메서드 사용)
+    this.score = TogglePolicy.calculateScore(this.stats);
 
     // 누적 통계
     this.totalStats.success += this.stats.success;
@@ -931,14 +726,18 @@ class VpnInstance {
     this.totalStats.taskCount += taskCount;
     this.totalStats.runCount++;
 
-    const scoreStatus = this.score <= -2 ? '⚠️ 재할당필요' : '✅';
-    vpnLog(this.agentId, `사이클 #${runNum} 완료 - 성공:${this.stats.success} 실패:${this.stats.fail} 차단:${this.stats.blocked} → 스코어:${this.score} ${scoreStatus}`);
+    // 상태 요약 (TogglePolicy 사용)
+    const statusSummary = this.togglePolicy.getStatusSummary({
+      score: this.score,
+      noWorkCount: this.noWorkCount,
+      successCount: this.successSinceToggle + this.stats.success
+    });
+    vpnLog(this.agentId, `사이클 #${runNum} 완료 - 성공:${this.stats.success} 실패:${this.stats.fail} 차단:${this.stats.blocked} → ${statusSummary}`);
 
     return {
       agentId: this.agentId,
       score: this.score,
-      stats: { ...this.stats },
-      shouldToggle: this.score <= -2  // -2 이하면 토글+재할당
+      stats: { ...this.stats }
     };
   }
 
@@ -966,69 +765,54 @@ class VpnInstance {
       this.successSinceToggle += result.stats.success;
 
       // ========================================
-      // 조건 0: 연속 3회 작업 없음 → 토글 + 반납 + 새 동글 할당
+      // TogglePolicy로 토글 조건 확인 (중앙화된 조건 관리)
       // ========================================
-      if (this.noWorkCount >= 3) {
-        vpnLog(this.agentId, `📭 연속 ${this.noWorkCount}회 작업 없음 → 토글 후 반납 + 새 동글 할당`);
-        this.noWorkCount = 0;
+      const toggleCheck = this.togglePolicy.shouldToggle({
+        noWorkCount: this.noWorkCount,
+        score: this.score,
+        successCount: this.successSinceToggle
+      });
 
-        // 1. IP 토글 (반납 전에)
-        await this.toggleIp();
-
-        // 2. VPN 재연결 (반납 + 새 동글 할당)
-        const reconnected = await this.reconnect();
-        if (!reconnected) {
-          vpnLog(this.agentId, '❌ VPN 재연결 실패 → 10초 후 재시도');
-          await new Promise(r => setTimeout(r, 10000));
-          continue;
-        }
-      }
-      // ========================================
-      // 조건 1: 스코어 <= -2 → IP 토글 + 반납 + 재할당
-      // ========================================
-      else if (result.shouldToggle && hasWork) {
-        vpnLog(this.agentId, `스코어 ${result.score} <= -2 (차단:${result.stats.blocked}) → IP 토글 후 재할당`);
+      if (toggleCheck.toggle) {
+        const emoji = toggleCheck.reason === ToggleReason.PREVENTIVE ? '✨' :
+                     toggleCheck.reason === ToggleReason.NO_WORK_STREAK ? '📭' : '🔄';
+        vpnLog(this.agentId, `${emoji} ${toggleCheck.message} → IP 토글 후 재할당`);
         this.totalStats.toggleCount++;
+
+        // 카운터 리셋
+        if (toggleCheck.reason === ToggleReason.NO_WORK_STREAK) {
+          this.noWorkCount = 0;
+        }
 
         // 1. IP 토글 (반납 전에)
         await this.toggleIp();
 
         // 2. VPN 재연결 (반납 + 새 동글 할당)
         let reconnected = false;
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        const maxAttempts = toggleCheck.reason === ToggleReason.BLOCKED ? 3 : 1;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           reconnected = await this.reconnect();
           if (reconnected) break;
-          vpnLog(this.agentId, `VPN 재연결 실패 (${attempt}/3) → ${attempt < 3 ? '10초 후 재시도' : '포기'}`);
-          if (attempt < 3) {
+          vpnLog(this.agentId, `VPN 재연결 실패 (${attempt}/${maxAttempts}) → ${attempt < maxAttempts ? '10초 후 재시도' : '포기'}`);
+          if (attempt < maxAttempts) {
             await new Promise(r => setTimeout(r, 10000));
           }
         }
 
-        if (!reconnected) {
-          vpnLog(this.agentId, '❌ VPN 재연결 3회 실패 → 루프 종료');
+        if (!reconnected && toggleCheck.reason === ToggleReason.BLOCKED) {
+          vpnLog(this.agentId, '❌ VPN 재연결 실패 → 루프 종료');
           break;
+        } else if (!reconnected) {
+          vpnLog(this.agentId, '❌ VPN 재연결 실패 → 10초 후 재시도');
+          await new Promise(r => setTimeout(r, 10000));
+          continue;
         }
 
         // 성공 카운터 리셋
         this.successSinceToggle = 0;
       }
-      // ========================================
-      // 조건 2: 성공 50회 이상 → IP 토글 + 반납 + 재할당
-      // ========================================
-      else if (this.successSinceToggle >= 50) {
-        vpnLog(this.agentId, `✨ 성공 ${this.successSinceToggle}회 → 예방적 토글 후 재할당`);
-        this.totalStats.toggleCount++;
-
-        // 1. IP 토글 (반납 전에)
-        await this.toggleIp();
-
-        // 2. VPN 재연결 (반납 + 새 동글 할당)
-        await this.reconnect();
-
-        // 성공 카운터 리셋
-        this.successSinceToggle = 0;
-      }
-      // 조건 3: 정상 → 계속 사용 (heartbeat은 위에서 이미 호출됨)
+      // 토글 불필요 → 계속 사용 (heartbeat은 위에서 이미 호출됨)
 
       // onceMode면 1회 실행 후 종료
       if (this.onceMode) {
