@@ -498,8 +498,14 @@ class VpnInstance {
         cleanupVpn(this.namespace, this.wgInterface);
         this.connected = false;
 
+        // 네임스페이스 삭제 완료 대기 (네트워크 라우팅 정리)
+        await new Promise(r => setTimeout(r, 500));
+
         // 2. IP 토글 (백그라운드 - VPN 끊긴 상태에서 호출)
-        await dongleAllocator.toggle(this.dongleInfo.serverIp, this.dongleNumber);
+        dongleAllocator.toggle(this.dongleInfo.serverIp, this.dongleNumber);
+
+        // 토글 요청 전송 후 잠시 대기 (서버 처리 시간)
+        await new Promise(r => setTimeout(r, 1000));
 
         // 3. 동글 반납 (로컬 네트워크로 호출)
         await dongleAllocator.release(this.agentId, this.dongleInfo.id);
