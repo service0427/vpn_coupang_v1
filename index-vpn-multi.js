@@ -310,6 +310,9 @@ function cleanupAllVpns() {
     // 0. VPN 관련 모든 프로세스 먼저 종료 (네임스페이스 삭제 전 필수!)
     try {
       // VPN 네임스페이스 내에서 실행 중인 모든 프로세스 종료
+      // 새 형식: U22-XX-XX-XXX (호스트네임 기반)
+      execSync(`pkill -9 -f "ip netns exec ${HOSTNAME}" 2>/dev/null || true`, { stdio: 'pipe' });
+      // 기존 형식도 정리: vpn-
       execSync('pkill -9 -f "ip netns exec vpn-" 2>/dev/null || true', { stdio: 'pipe' });
       // Chrome 프로세스 종료
       execSync('pkill -9 -f "browser-data/vpn_" 2>/dev/null || true', { stdio: 'pipe' });
@@ -329,11 +332,16 @@ function cleanupAllVpns() {
       }
     } catch (e) {}
 
-    // 2. 현재 존재하는 모든 vpn- 네임스페이스 찾기
+    // 2. 현재 존재하는 모든 VPN 네임스페이스 찾기
+    // 새 형식: U22-XX-XX-XXX (호스트네임으로 시작)
+    // 기존 형식: vpn-U22-XX-XX
     const nsList = execSync('ip netns list 2>/dev/null || true', { encoding: 'utf8' });
     const namespaces = nsList
       .split('\n')
-      .filter(ns => ns.trim().startsWith('vpn-'))
+      .filter(ns => {
+        const name = ns.trim();
+        return name.startsWith(HOSTNAME) || name.startsWith('vpn-');
+      })
       .map(ns => ns.split(' ')[0].trim())
       .filter(ns => ns.length > 0);
 
@@ -382,7 +390,10 @@ function cleanupAllVpns() {
     // 3. 삭제 확인
     const remaining = execSync('ip netns list 2>/dev/null || true', { encoding: 'utf8' })
       .split('\n')
-      .filter(ns => ns.trim().startsWith('vpn-'))
+      .filter(ns => {
+        const name = ns.trim();
+        return name.startsWith(HOSTNAME) || name.startsWith('vpn-');
+      })
       .map(ns => ns.split(' ')[0].trim())
       .filter(ns => ns.length > 0);
 
@@ -463,7 +474,10 @@ class VpnInstance {
       vpnLog(this.agentId, `동글 할당됨: dongle=${this.dongleNumber}, server=${this.dongleInfo.serverIp}`);
 
       // 2. 네임스페이스/인터페이스 이름 설정
-      this.namespace = `vpn-${this.agentId}`;
+      // 형식: {agentId}-{dongleNumber} (예: U22-01-05-031)
+      // ip netns list로 어떤 에이전트가 어떤 동글을 쓰는지 바로 확인 가능
+      const dongleStr = String(this.dongleNumber).padStart(3, '0');
+      this.namespace = `${this.agentId}-${dongleStr}`;
       this.wgInterface = `wg-${this.dongleNumber}`;
 
       // 3. WireGuard 설정 생성
