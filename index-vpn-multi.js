@@ -260,15 +260,41 @@ function getVpnPublicIp(namespace) {
   }
 }
 
-// VPN 정리
+// VPN 정리 (개별 네임스페이스)
 function cleanupVpn(namespace, wgInterface) {
   try {
+    // 1. 네임스페이스 내 프로세스 강제 종료
+    try {
+      const pids = execSync(`ip netns pids ${namespace} 2>/dev/null || true`, { encoding: 'utf8' })
+        .trim().split('\n').filter(p => p.trim());
+      for (const pid of pids) {
+        execSync(`kill -9 ${pid} 2>/dev/null || true`, { stdio: 'pipe' });
+      }
+    } catch (e) {}
+
+    // 2. 네임스페이스 내 모든 wg 인터페이스 삭제
+    try {
+      const nsInterfaces = execSync(`ip -n ${namespace} link show 2>/dev/null || true`, { encoding: 'utf8' });
+      const wgInNs = nsInterfaces.match(/wg-\d+/g) || [];
+      for (const wg of wgInNs) {
+        execSync(`ip -n ${namespace} link del ${wg} 2>/dev/null || true`, { stdio: 'pipe' });
+      }
+    } catch (e) {}
+
+    // 3. 특정 인터페이스도 삭제 시도
     execSync(`ip -n ${namespace} link del ${wgInterface} 2>/dev/null || true`, { stdio: 'pipe' });
+
+    // 4. 네임스페이스 삭제
     execSync(`ip netns del ${namespace} 2>/dev/null || true`, { stdio: 'pipe' });
+
+    // 5. DNS 설정 파일 정리
     const dnsDir = `/etc/netns/${namespace}`;
     if (fs.existsSync(dnsDir)) {
       fs.rmSync(dnsDir, { recursive: true, force: true });
     }
+
+    // 6. 전역 wg 인터페이스도 삭제 (혹시 남아있으면)
+    execSync(`ip link del ${wgInterface} 2>/dev/null || true`, { stdio: 'pipe' });
   } catch (e) {}
 }
 
@@ -281,6 +307,16 @@ function cleanupAllVpns() {
   let cleanedCount = 0;
 
   try {
+    // 0. VPN 관련 모든 프로세스 먼저 종료 (네임스페이스 삭제 전 필수!)
+    try {
+      // VPN 네임스페이스 내에서 실행 중인 모든 프로세스 종료
+      execSync('pkill -9 -f "ip netns exec vpn-" 2>/dev/null || true', { stdio: 'pipe' });
+      // Chrome 프로세스 종료
+      execSync('pkill -9 -f "browser-data/vpn_" 2>/dev/null || true', { stdio: 'pipe' });
+      // 잠시 대기 (프로세스 종료 완료 대기)
+      execSync('sleep 0.5', { stdio: 'pipe' });
+    } catch (e) {}
+
     // 1. 모든 wg- 인터페이스 삭제 (네임스페이스 밖에 있는 것들)
     try {
       const interfaces = execSync('ip link show 2>/dev/null || true', { encoding: 'utf8' });
@@ -288,17 +324,29 @@ function cleanupAllVpns() {
       for (const wg of wgInterfaces) {
         execSync(`ip link del ${wg} 2>/dev/null || true`, { stdio: 'pipe' });
       }
+      if (wgInterfaces.length > 0) {
+        log(`  ├─ 전역 wg 인터페이스 ${wgInterfaces.length}개 삭제`);
+      }
     } catch (e) {}
 
     // 2. 현재 존재하는 모든 vpn- 네임스페이스 찾기
-    const namespaces = execSync('ip netns list 2>/dev/null || true', { encoding: 'utf8' })
+    const nsList = execSync('ip netns list 2>/dev/null || true', { encoding: 'utf8' });
+    const namespaces = nsList
       .split('\n')
       .filter(ns => ns.trim().startsWith('vpn-'))
-      .map(ns => ns.split(' ')[0].trim());
+      .map(ns => ns.split(' ')[0].trim())
+      .filter(ns => ns.length > 0);
+
+    if (namespaces.length === 0) {
+      log('🧹 기존 VPN 없음 - 정리 완료');
+      return;
+    }
+
+    log(`  ├─ ${namespaces.length}개 네임스페이스 발견: ${namespaces.join(', ')}`);
 
     for (const ns of namespaces) {
       try {
-        // 네임스페이스 내의 모든 wg- 인터페이스 삭제
+        // 네임스페이스 내의 모든 인터페이스 삭제
         try {
           const nsInterfaces = execSync(`ip -n ${ns} link show 2>/dev/null || true`, { encoding: 'utf8' });
           const wgInNs = nsInterfaces.match(/wg-\d+/g) || [];
@@ -307,8 +355,17 @@ function cleanupAllVpns() {
           }
         } catch (e) {}
 
-        // 네임스페이스 삭제
-        execSync(`ip netns del ${ns} 2>/dev/null || true`, { stdio: 'pipe' });
+        // 네임스페이스 내 프로세스 강제 종료 (SIGKILL)
+        try {
+          const pids = execSync(`ip netns pids ${ns} 2>/dev/null || true`, { encoding: 'utf8' })
+            .trim().split('\n').filter(p => p.trim());
+          for (const pid of pids) {
+            execSync(`kill -9 ${pid} 2>/dev/null || true`, { stdio: 'pipe' });
+          }
+        } catch (e) {}
+
+        // 네임스페이스 삭제 (강제)
+        execSync(`ip netns del ${ns}`, { stdio: 'pipe' });
 
         // DNS 설정 파일 정리
         const dnsDir = `/etc/netns/${ns}`;
@@ -317,17 +374,25 @@ function cleanupAllVpns() {
         }
 
         cleanedCount++;
-      } catch (e) {}
+      } catch (e) {
+        warn(`  ├─ ⚠️ ${ns} 삭제 실패: ${e.message}`);
+      }
     }
 
-    // 3. VPN 관련 Chrome 프로세스 정리
-    try {
-      execSync('pkill -9 -f "browser-data/vpn_" 2>/dev/null || true', { stdio: 'pipe' });
-    } catch (e) {}
+    // 3. 삭제 확인
+    const remaining = execSync('ip netns list 2>/dev/null || true', { encoding: 'utf8' })
+      .split('\n')
+      .filter(ns => ns.trim().startsWith('vpn-'))
+      .map(ns => ns.split(' ')[0].trim())
+      .filter(ns => ns.length > 0);
 
-    log(`🧹 기존 VPN 정리 완료 (${cleanedCount}개 정리됨)`);
+    if (remaining.length > 0) {
+      warn(`  └─ ⚠️ 삭제 실패한 네임스페이스: ${remaining.join(', ')}`);
+    } else {
+      log(`🧹 기존 VPN 정리 완료 (${cleanedCount}개 삭제됨)`);
+    }
   } catch (e) {
-    log(`🧹 기존 VPN 정리 완료 (오류 무시)`);
+    warn(`🧹 기존 VPN 정리 중 오류: ${e.message}`);
   }
 }
 
