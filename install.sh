@@ -106,19 +106,19 @@ if [ ! -f "$SUDOERS_FILE" ]; then
     echo "⚠️  VPN 모드용 sudoers 설정"
     echo "=========================================="
     echo ""
-    echo "VPN 모드 실행 시 node, ip 명령어를 비밀번호 없이 실행해야 합니다."
+    echo "VPN 모드 실행 시 node, npm, ip 명령어를 비밀번호 없이 실행해야 합니다."
     echo ""
     read -p "sudoers 설정을 자동으로 추가하시겠습니까? (y/n): " -n 1 -r
     echo ""
 
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        sudo bash -c "echo '${CURRENT_USER} ALL=(ALL) NOPASSWD: /usr/bin/node, /usr/sbin/ip, /sbin/ip' > ${SUDOERS_FILE} && chmod 440 ${SUDOERS_FILE}"
+        sudo bash -c "echo '${CURRENT_USER} ALL=(ALL) NOPASSWD: /usr/bin/node, /usr/bin/npm, /usr/sbin/ip, /sbin/ip' > ${SUDOERS_FILE} && chmod 440 ${SUDOERS_FILE}"
         echo "✅ sudoers 설정 완료: ${SUDOERS_FILE}"
     else
         echo ""
         echo "수동으로 설정하려면 다음 명령어 실행:"
         echo ""
-        echo "  sudo bash -c 'echo \"${CURRENT_USER} ALL=(ALL) NOPASSWD: /usr/bin/node, /usr/sbin/ip, /sbin/ip\" > ${SUDOERS_FILE} && chmod 440 ${SUDOERS_FILE}'"
+        echo "  sudo bash -c 'echo \"${CURRENT_USER} ALL=(ALL) NOPASSWD: /usr/bin/node, /usr/bin/npm, /usr/sbin/ip, /sbin/ip\" > ${SUDOERS_FILE} && chmod 440 ${SUDOERS_FILE}'"
     fi
     echo ""
 else

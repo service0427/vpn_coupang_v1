@@ -110,7 +110,7 @@ function parseArgs() {
   }
 
   options.vpnCount = Math.max(1, Math.min(10, options.vpnCount || DEFAULT_VPN_COUNT));
-  options.threadsPerVpn = Math.max(1, Math.min(8, options.threadsPerVpn || DEFAULT_THREADS_PER_VPN));
+  options.threadsPerVpn = Math.max(1, Math.min(10, options.threadsPerVpn || DEFAULT_THREADS_PER_VPN));
 
   return options;
 }
@@ -128,7 +128,7 @@ agent_id 형식: ${HOSTNAME}-{순번}
 
 옵션:
   -v, --vpn-count <n>  VPN 개수 (1~10, 기본: ${DEFAULT_VPN_COUNT})
-  -t, --threads <n>    VPN당 쓰레드 수 (1~8, 기본: ${DEFAULT_THREADS_PER_VPN})
+  -t, --threads <n>    VPN당 쓰레드 수 (1~10, 기본: ${DEFAULT_THREADS_PER_VPN})
   --once               1회만 실행 후 종료
   --debug              디버그 모드
   -h, --help           도움말 표시
