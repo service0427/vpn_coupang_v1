@@ -11,13 +11,32 @@
  * - 스코어 < 2 이면 해당 VPN만 IP 토글 후 재시작
  * - 다른 VPN에 영향 없이 독립적으로 동작
  *
- * 사용법:
+ * ============================================================
+ * 기본 사용법:
+ * ============================================================
  *   sudo npm start              # 기본: VPN 10개, 쓰레드 3개
  *   sudo npm start -- -v 5      # VPN 5개
  *   sudo npm start -- -v 5 -t 2 # VPN 5개, 쓰레드 2개
  *
- * 디버깅 (콘솔 로그 파일 저장):
- *   sudo npm start -- --debug 2>&1 | tee "logs/multi_$(date +%Y%m%d_%H%M%S).log"
+ * ============================================================
+ * 디버깅 예제:
+ * ============================================================
+ *
+ * 1. 최소 구성 (VPN 1개, 쓰레드 1개, 1회 실행, 브라우저 유지):
+ *    sudo node index-vpn-multi.js -v 1 -t 1 --once --debug
+ *    → 작업 완료 후 브라우저 유지, 엔터 누르면 종료
+ *
+ * 2. 상세 로그와 함께 파일 저장:
+ *    sudo node index-vpn-multi.js -v 1 -t 1 --debug 2>&1 | tee "logs/debug_$(date +%Y%m%d_%H%M%S).log"
+ *
+ * 3. VPN 3개, 쓰레드 2개로 테스트:
+ *    sudo node index-vpn-multi.js -v 3 -t 2 --debug
+ *
+ * 참고:
+ * - --debug: 브라우저 내부 로그 실시간 출력
+ * - --once + -t 1: 작업 완료 후 브라우저 유지 (엔터로 종료)
+ * - 로그 파일: logs/{agent_id}.log 에 저장됨
+ * - VPN 상태 JSON: browser-data/vpn-status/{agent_id}.json
  */
 
 const { execSync } = require('child_process');
