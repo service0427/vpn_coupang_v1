@@ -51,8 +51,8 @@ const { DongleAllocator } = require('./lib/modules/api-service');
 const { WireGuardHelper, VpnManager, VpnAgent } = require('./lib/vpn');
 
 // 설정
-const DEFAULT_VPN_COUNT = 10;
-const DEFAULT_THREADS_PER_VPN = 3;
+const DEFAULT_VPN_COUNT = 6;
+const DEFAULT_THREADS_PER_VPN = 6;
 const HOSTNAME = os.hostname().replace(/^tech-/i, '');
 
 // 전역 디버그 모드
