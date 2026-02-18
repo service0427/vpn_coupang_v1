@@ -282,7 +282,7 @@ async function main() {
 
     // 동글 반납
     log('동글 반납 중...');
-    await Promise.all(managers.map(m => m.releaseDongle().catch(() => {})));
+    await Promise.all(managers.map(m => m.releaseDongle().catch(() => { })));
     log('동글 반납 완료');
 
     await new Promise(r => setTimeout(r, 1000));
@@ -377,7 +377,7 @@ async function main() {
     // 동글 반납
     console.log('');
     log('동글 반납 중...');
-    await Promise.all(managers.map(m => m.releaseDongle().catch(() => {})));
+    await Promise.all(managers.map(m => m.releaseDongle().catch(() => { })));
     log('동글 반납 완료');
     cleanupAllVpns();
   }

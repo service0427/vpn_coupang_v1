@@ -157,3 +157,6 @@ clean-shared-cache.sh
 
 # Claude Code 참고 문서 (개발 서버 전용)
 CLAUDE.md
+
+# External tools
+external-tools/
